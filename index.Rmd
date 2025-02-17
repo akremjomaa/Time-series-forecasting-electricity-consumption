@@ -1,0 +1,852 @@
+---
+title: "Analyse des Séries Temporelles - Préparation des Données"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+---
+# Rapport : Prévision de la Consommation Électrique avec et sans Covariables
+
+## 1. Introduction
+
+### Objectif principal
+
+L’objectif de ce projet est de prévoir la consommation électrique pour une période future (17 février 2010) en utilisant différents modèles de prévision, avec et sans l’intégration de la température extérieure comme covariable.
+
+### Méthodologie
+
+1. Exploration et transformation des données.
+2. Tests de plusieurs modèles (régression, ARIMA, Holt-Winters, RNN, XGBoost).
+3. Comparaison des performances en termes de RMSE sur les données TEST.
+4. Prévisions des données futures.
+
+## 2. Données et Prétraitement
+
+### Données disponibles
+
+- **Consommation électrique (kW)** : Donnée principale à modéliser.
+- **Température extérieure (°C)** : Covariable explicative.
+
+
+
+### Chargement des Bibliothèques
+
+```{r setup}
+
+knitr::opts_chunk$set(warning = FALSE)
+
+library(fpp)          # Méthodes de prévision
+library(readxl)       # Pour lire les fichiers Excel
+library(lubridate)    # Gestion des dates et heures
+library(forecast)     # Analyse des séries temporelles
+library(ggplot2)      # Visualisation
+```
+
+### Chargement et Exploration des Données
+
+```{r load-data}
+# Charger les données depuis un fichier Excel
+data <- readxl::read_excel("Elec-train.xlsx")
+
+```
+###  Prétraitement des Données
+
+```{r preprocess-data}
+# Conversion des dates au bon format
+data$Timestamp[1] <- "1/1/2010 1:15"  # Correction manuelle du premier enregistrement
+data$Timestamp <- mdy_hm(data$Timestamp)
+
+# Renommage des colonnes 
+colnames(data) <- c("date", "electricity_consumption", "outdoor_temperature")
+
+```
+
+### Conversion en Séries Temporelles
+
+Les données initiales sont brutes et nécessitent une transformation en séries temporelles adaptées à l'analyse. Deux séries ont été créées : une pour la consommation d’énergie et une autre pour la température extérieure. Les données de consommation sont collectées toutes les 15 minutes, couvrant la période du 1er janvier 2010 à 01:15 au 16 février 2010 à 23:45. Les données de température, quant à elles, s'étendent du 1er janvier 2010 au 17 février 2010.
+
+Étant donné que la prévision doit porter sur une journée complète (le 17 février 2010), nous avons choisi une fréquence de 96 observations par jour, correspondant aux 96 quarts d’heure. De plus, la série temporelle commence au jour 1, au 5ᵉ quart d’heure, en raison de la disponibilité des données à partir de 01:15.
+
+
+```{r create-timeseries}
+# Création de la série temporelle pour la consommation
+consumption_electricity_ts <- ts(
+  data$electricity_consumption,
+  start = c(1, 5),     # Début : jour 1, 5e quart d'heure
+  frequency = 96       # 96 quarts d'heure par jour
+)
+
+# Création de la série temporelle pour la température
+temperature_ts <- ts(
+  data$outdoor_temperature,
+  start = c(1, 5),
+  frequency = 96
+)
+
+```
+
+### Division en Entraînement et Test
+
+Pour diviser les données, le 17ᵉ jour complet (16 février 2010) a été réservé à l'ensemble de test, car la prévision cible est basée sur une journée entière (17 février 2010). Les données restantes ont été utilisées pour l'entraînement. Cette répartition garantit une évaluation cohérente et réaliste des performances des modèles.
+
+- Entraînement : Jusqu’au 15 février 2010 inclus.
+- Test : 16 février 2010.
+- Prévisions futures : 17 février 2010.
+
+
+```{r split-data}
+# Données d'entraînement (16 premiers jours)
+train_consumption_electricity <- window(consumption_electricity_ts, start = c(1, 5), end = c(46, 95))
+train_temperature_ts <- window(temperature_ts, start = c(1, 5), end = c(46, 95))
+
+# Données de test (17e jour)
+test_consumption_electricity <- window(consumption_electricity_ts, start = c(46, 96), end = c(47, 95))
+test_temperature_ts <- window(temperature_ts, start = c(46, 96), end = c(47, 95))
+
+# Données de prévision (18e jour)
+predict_consumption_electricity <- window(consumption_electricity_ts, start = c(47, 96), end = c(48, 95))
+predict_temperature <- window(temperature_ts, start = c(47, 96), end = c(48, 95))
+```
+
+### Analyse Saisonnalité
+
+```{r seasonal-plot}
+# Visualisation de la saisonnalité sur les données d'entraînement
+ggseasonplot(
+  train_consumption_electricity,
+  year.labels = TRUE,
+  year.labels.left = TRUE,
+  main = "Graphique Saisonnier - Consommation d'Électricité"
+)
+```
+
+### Interprétation :
+
+En analysant la saisonnalité, une forte régularité quotidienne est observée : la consommation d'électricité connaît une augmentation notable à partir de 9h15 (32ᵉ quart d'heure après 01h15). Ce comportement reflète probablement le début des activités matinales et le réveil des utilisateurs, marquant une période d'usage énergétique accru.
+
+
+# Modèles sans covariables
+
+Pour évaluer mes modèles, j'ai choisi de me baser sur le RMSE (Root Mean Square Error) calculé sur les données de test. Cette métrique est particulièrement pertinente car elle permet de mesurer la précision des prévisions en se rapprochant au mieux des conditions réelles de notre objectif : prédire la consommation électrique sur une journée complète, comme celle couverte par la période des données de test.
+
+## Modélisation - Régression Linéaire
+
+```{r linear-regression}
+# Création de la variable temporelle
+time_train <- 1:length(train_consumption_electricity)
+
+# Ajustement du modèle linéaire
+lm_model <- lm(train_consumption_electricity ~ time_train)
+summary(lm_model)  # Résumé du modèle
+
+# Prédictions pour l'ensemble de test
+time_test <- (length(train_consumption_electricity) + 1):(length(train_consumption_electricity) + length(test_consumption_electricity))
+test_predictions <- predict(lm_model, newdata = data.frame(time_train = time_test))
+
+# Prédictions pour l'ensemble de prévision
+time_forecast <- (length(train_consumption_electricity) + length(test_consumption_electricity) + 1):(length(train_consumption_electricity) + length(test_consumption_electricity) + length(predict_consumption_electricity))
+forecast_predictions <- predict(lm_model, newdata = data.frame(time_train = time_forecast))
+
+# Calcul du RMSE pour l'ensemble de test
+rmse_linear <- sqrt(mean((test_consumption_electricity - test_predictions)^2))
+cat("RMSE pour le modèle linéaire (test):", rmse_linear, "\n")
+```
+
+## Modélisation - Lissage Exponentiel
+
+```{r}
+# Modèle 1 : Lissage exponentiel simple
+ses_model <- ses(train_consumption_electricity, h = 96)
+ses_forecast <- forecast(ses_model, h = length(test_consumption_electricity))
+rmse_ses <- sqrt(mean((test_consumption_electricity - ses_forecast$mean)^2))
+cat("RMSE pour le lissage exponentiel simple:", rmse_ses, "\n")
+```
+
+## Modélisation - Lissage de Holt sans saisonnalité
+
+```{r exponential-smoothing}
+holt_model <- holt(train_consumption_electricity, h = 96)
+holt_forecast <- forecast(holt_model, h = length(test_consumption_electricity))
+rmse_holt <- sqrt(mean((test_consumption_electricity - holt_forecast$mean)^2))
+cat("RMSE pour le modèle Holt sans saisonnalité:", rmse_holt, "\n")
+```
+
+## Modélisation - Holt-Winters avec saisonnalité additive
+
+```{r}
+hw_model_add <- HoltWinters(train_consumption_electricity, seasonal = "additive")
+summary(hw_model_add)
+hw_forecast_add <- forecast(hw_model_add, h = length(test_consumption_electricity))
+rmse_hw_add <- sqrt(mean((test_consumption_electricity - hw_forecast_add$mean)^2))
+cat("RMSE pour Holt-Winters Additif:", rmse_hw_add, "\n")
+```
+
+Bien que l'effet saisonnier de la série temporelle de consommation ne soit pas constant (il varie d'un jour à l'autre), ce modèle a fourni des résultats relativement acceptables, avec un RMSE de 16,86. Cela montre qu'il parvient à capturer une partie des variations saisonnières, même si elles ne sont pas totalement régulières.
+
+## Modélisation - Holt-Winters avec saisonnalité multiplicative
+
+```{r}
+hw_model_mult <- HoltWinters(train_consumption_electricity, seasonal = "multiplicative")
+summary(hw_model_mult)
+hw_forecast_mult <- forecast(hw_model_mult, h = length(test_consumption_electricity))
+rmse_hw_mult <- sqrt(mean((test_consumption_electricity - hw_forecast_mult$mean)^2))
+cat("RMSE pour Holt-Winters Multiplicatif:", rmse_hw_mult, "\n")
+```
+Sur la base de mes données, ce modèle est censé offrir les meilleures performances, car il prend en compte les variations de l'effet saisonnier. Cette hypothèse a été confirmée lors de son application, avec un RMSE de 13,92, ce qui en fait l'un des modèles les plus performants de cette analyse.
+
+
+## Modélisation - ARIMA
+
+```{r arima-auto}
+# Début de la mesure du temps d'exécution
+start_time <- Sys.time()
+# Ajustement automatique du modèle ARIMA
+auto_arima <- auto.arima(train_consumption_electricity)
+# Fin de la mesure du temps d'exécution
+end_time <- Sys.time()
+
+summary(auto_arima)
+
+# Calcul et affichage du temps total d'exécution
+temps_total <- end_time - start_time
+cat(sprintf("Temps total d'exécution : %.2f secondes\n", as.numeric(temps_total, units = "secs")))
+```
+
+```{r}
+# Prédictions sur l'ensemble de test
+arima_forecast <- forecast(auto_arima, h = length(test_consumption_electricity))
+rmse_arima <- sqrt(mean((test_consumption_electricity - arima_forecast$mean)^2))
+cat("RMSE pour ARIMA automatique:", rmse_arima, "\n")
+```
+
+```{r}
+# Vérification des résidus
+checkresiduals(auto_arima)
+```
+En analysant les résidus, nous constatons que le modèle ne parvient pas à capturer toutes les autocorrélations significatives. Cela indique que certaines relations temporelles importantes dans la série ne sont pas correctement modélisées, ce qui peut limiter la précision des prévisions. Une optimisation supplémentaire des paramètres ou l'intégration de covariables pourrait améliorer ces performances.
+
+## Modélisation - ARIMA Manuel
+
+```{r arima-manual}
+# Inspection des autocorrélations
+ggAcf(train_consumption_electricity, main = "Autocorrélation de la Consommation")
+ggPacf(train_consumption_electricity, main = "Autocorrélation Partielle")
+```
+
+```{r}
+# Différenciation pour stationnarité
+train_consumption_electricitydiff <- diff(diff(train_consumption_electricity, lag = 96))
+plot(train_consumption_electricitydiff, main = "Différenciation Double (Saisonnalité et Tendances)")
+```
+
+```{r}
+# Autocorrélations après différenciation
+ggAcf(train_consumption_electricitydiff, main = "ACF après Différenciation")
+ggPacf(train_consumption_electricitydiff, main = "PACF après Différenciation")
+```
+
+Nous avons appliqué une différenciation pour atteindre la stationnarité et une autre pour capturer la saisonnalité. En analysant l'ACF, nous observons un pic notable au lag 96, ce qui reflète une forte saisonnalité quotidienne (correspondant à une journée entière). De plus, le PACF présente des pics marqués aux lags 96, 192, etc., indiquant des corrélations significatives avec les jours précédents (1 jour, 2 jours, et ainsi de suite).
+
+
+## Modélisation - SARIMA 
+
+```{r}
+# Début de la mesure du temps d'exécution
+start_time <- Sys.time()
+
+# Ajustement manuel avec des paramètres
+sarima_man <- Arima(
+  train_consumption_electricity,
+  order = c(5, 0, 0),
+  seasonal = list(order = c(0, 1, 1), period = 96)
+)
+
+# Fin de la mesure du temps d'exécution
+end_time <- Sys.time()
+
+# Affichage des paramètres 
+summary(sarima_man)
+```
+
+```{r}
+# Vérification des résidus
+checkresiduals(sarima_man)
+```
+
+```{r}
+# Prédictions sur l'ensemble de test
+sarima_man_forecast <- forecast(sarima_man, h = 96)
+rmse_sarima_man <- sqrt(mean((test_consumption_electricity - sarima_man_forecast$mean)^2))
+cat("RMSE pour SARIMA Affiné:", rmse_sarima_man, "\n")
+
+# Visualisation
+autoplot(sarima_man_forecast, main = "Prévisions SARIMA Affiné (Test Set)") +
+  autolayer(test_consumption_electricity, series = "Données réelles")
+
+# Calcul et affichage du temps total d'exécution
+temps_total <- end_time - start_time
+cat(sprintf("Temps total d'exécution : %.2f secondes\n", as.numeric(temps_total, units = "secs")))
+```
+
+2eme modele manuel
+
+```{r}
+# Début de la mesure du temps d'exécution
+start_time <- Sys.time()
+sarima_manual <- Arima(
+  train_consumption_electricity,
+  order = c(1, 1, 1),
+  seasonal = list(order = c(1, 1, 1), period = 96)
+)
+# Fin de la mesure du temps d'exécution
+end_time <- Sys.time()
+summary(sarima_manual)
+# Calcul et affichage du temps total d'exécution
+temps_total <- end_time - start_time
+cat(sprintf("Temps total d'exécution : %.2f secondes\n", as.numeric(temps_total, units = "secs")))
+```
+
+```{r}
+
+# Prédictions et évaluation
+sarima_forecast = forecast(sarima_manual, h = 96)
+rmse_sarima <- sqrt(mean((test_consumption_electricity - sarima_forecast$mean)^2))
+cat("RMSE pour ARIMA Manuel:", rmse_sarima, "\n")
+
+```
+
+Étant donné la taille relativement importante de notre jeu de données par rapport aux séries temporelles classiques, j'ai exploré l'utilisation d'un réseau de neurones récurrent (RNN) à travers l'algorithme nnetar. 
+
+### Entraînement et prévision
+
+```{r rnn-model}
+# Démarrer le chronomètre
+start_time <- Sys.time()
+
+# Entraîner le modèle de réseau de neurones
+rnn_model <- nnetar(train_consumption_electricity)
+summary(rnn_model)
+```
+
+```{r}
+
+# Prévision avec le modèle de réseau de neurones
+rnn_forecast <- forecast(rnn_model, h = length(test_consumption_electricity))
+
+# Arrêter le chronomètre
+end_time <- Sys.time()
+execution_time_rnn <- end_time - start_time
+cat(sprintf("Temps d'exécution pour le modèle RNN : %.2f secondes\n", as.numeric(execution_time_rnn, units = "secs")))
+```
+
+## Modélisation avec XGBoost
+
+Après avoir exploré les modèles dédiés aux séries temporelles, j’ai opté pour l’utilisation d’un modèle d’apprentissage supervisé classique, XGBoost. Cependant, XGBoost n’est pas directement conçu pour traiter les séries temporelles. Pour surmonter cette limitation, j’ai transformé les données en créant des lags qui servent de variables explicatives. Ces lags permettent de capturer les dépendances temporelles et sont fournies au modèle comme entrées.
+
+Pour aller au-delà des relations journalières et inclure des dynamiques hebdomadaires,j’ai choisi un max lag de 672 (correspondant à une semaine complète en quarts d’heure). Cette approche capture une quantité maximale d’informations pertinentes. J’ai également testé un max lag de 96 (une journée), mais les performances avec un lag de 672 se sont révélées meilleures
+
+
+```{r xgboost-data-preparation}
+
+# Préparation des données décalées
+
+set.seed(42)
+# Fonction pour créer les lags
+create_lagged_data <- function(series, max_lag) {
+  data <- data.frame(Target = series)
+  for (lag in 1:max_lag) {
+    data[[paste0("Lag", lag)]] <- lag(series, n = lag)
+  }
+  return(na.omit(data))  
+}
+
+# Définition des paramètres
+max_lag <- 672 # une semaine
+
+# Création des lags pour les données sans covariables
+lagged_data_no_covar <- create_lagged_data(as.numeric(c(train_consumption_electricity, test_consumption_electricity)), max_lag)
+
+# Division en ensembles d'entraînement et de test
+train_data_no_covar <- lagged_data_no_covar[1:(length(train_consumption_electricity) - max_lag), ]
+test_data_no_covar <- lagged_data_no_covar[(length(train_consumption_electricity) - max_lag + 1):nrow(lagged_data_no_covar), ]
+
+# Préparer les matrices pour XGBoost
+train_matrix_no_covar <- as.matrix(train_data_no_covar[, -1])
+test_matrix_no_covar <- as.matrix(test_data_no_covar[, -1])
+train_target_no_covar <- train_data_no_covar$Target
+test_target_no_covar <- test_data_no_covar$Target
+
+```
+
+
+```{r xgboost-model}
+
+# Entraînement et prévision avec XGBoost
+
+library(xgboost)
+
+# Démarrer le chronomètre
+start_time <- Sys.time()
+# Création des DMatrix
+dtrain_no_covar <- xgb.DMatrix(data = train_matrix_no_covar, label = train_target_no_covar)
+dtest_no_covar <- xgb.DMatrix(data = test_matrix_no_covar, label = test_target_no_covar)
+
+# Entraînement
+xgb_model_no_covar <- xgb.train(
+  params = list(
+    objective = "reg:squarederror",
+    eta = 0.1,
+    max_depth = 6,
+    subsample = 0.8,
+    colsample_bytree = 0.8
+  ),
+  data = dtrain_no_covar,
+  nrounds = 100,
+  watchlist = list(train = dtrain_no_covar, test = dtest_no_covar),
+  early_stopping_rounds = 10
+)
+# Arrêter le chronomètre
+end_time <- Sys.time()
+execution_time_xgb <- end_time - start_time
+cat(sprintf("Temps d'exécution pour le modèle XGBoost : %.2f secondes\n", as.numeric(execution_time_xgb, units = "secs")))
+```
+
+
+
+```{r xgboost-evaluation}
+# Évaluation et visualisation
+# Prédictions
+xgb_predictions_no_covar <- predict(xgb_model_no_covar, newdata = dtest_no_covar)
+
+# Calcul du RMSE
+rmse_no_covar <- sqrt(mean((test_target_no_covar - xgb_predictions_no_covar)^2))
+cat("RMSE pour XGBoost sans covariables :", rmse_no_covar, "\n")
+```
+
+# Analyse et Modélisation avec Covariables
+
+Pour affiner les prédictions, j'ai décidé d'intégrer les données de température extérieure en tant que covariables dans les modèles. Cette démarche vise à inclure un facteur explicatif supplémentaire pouvant influencer la consommation électrique.
+
+La première étape a consisté à analyser la relation et la corrélation entre la consommation électrique et la température.
+
+### Visualisation des covariables
+
+```{r}
+# Tracer la consommation et la température extérieure
+plot(data$electricity_consumption, data$outdoor_temperature,
+     xlab = "Consommation d'électricité",
+     ylab = "Température extérieure",
+     main = "Relation entre la consommation et la température",
+     col = "blue", pch = 16)
+```
+L'analyse initiale a révélé que la relation entre la température extérieure et la consommation d'énergie n'est pas strictement linéaire. Cela signifie que l'effet de la température sur la consommation peut varier en fonction des niveaux de température, ce qui nécessite l'exploration de modèles non linéaires, tels que des modèles quadratiques, pour mieux capturer cette dynamique.
+
+```{r}
+# Création du data.frame pour ggplot
+library(ggplot2)
+plot_data <- data.frame(
+  Timestamp = seq(from = 1, to = length(train_consumption_electricity)),  # Index temporel
+  Consumption = as.numeric(train_consumption_electricity),
+  Temperature = as.numeric(train_temperature_ts)
+)
+
+# Visualisation avec ggplot2
+ggplot(plot_data, aes(x = Timestamp)) +
+  geom_line(aes(y = Consumption, color = "Consommation")) +
+  geom_line(aes(y = Temperature, color = "Température")) +
+  scale_color_manual(
+    name = "Variables",
+    values = c("Consommation" = "blue", "Température" = "red")
+  ) +
+  labs(
+    title = "Consommation d'électricité et température extérieure",
+    x = "Temps",
+    y = "Valeurs"
+  ) +
+  theme_minimal()
+```
+
+
+### Corrélation entre consommation et température
+
+```{r}
+# Calcul de la corrélation
+correlation <- cor(plot_data$Consumption, plot_data$Temperature)
+cat("Corrélation entre la consommation et la température :", correlation, "\n")
+```
+
+### Modèles linéaires et quadratiques
+
+#### Modèle linéaire
+
+```{r}
+# Ajuster un modèle linéaire
+lm_linear <- lm(electricity_consumption ~ outdoor_temperature, data = data)
+summary(lm_linear)  # Résultat du modèle
+```
+
+#### Modèle quadratique
+
+```{r}
+# Ajouter un terme quadratique pour la température
+data$Temperature2 <- data$outdoor_temperature^2
+
+# Ajuster un modèle quadratique
+lm_quadratic <- lm(electricity_consumption ~ outdoor_temperature + Temperature2, data = data)
+summary(lm_quadratic)
+
+# Visualisation
+ggplot(data, aes(x = outdoor_temperature, y = electricity_consumption)) +
+  geom_point(color = "blue", alpha = 0.5) +
+  stat_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red") +
+  labs(
+    title = "Modèle quadratique : Consommation vs Température",
+    x = "Température extérieure",
+    y = "Consommation d'électricité"
+  )
+```
+
+#### Comparaison des modèles
+
+```{r}
+# Comparaison entre les modèles linéaire et quadratique
+anova(lm_linear, lm_quadratic)
+```
+
+### Conclusion sur la relation quadratique
+
+La p-valeur très petite (\< 0.001) indique que le modèle quadratique explique significativement mieux la relation entre la consommation et la température que le modèle linéaire.
+
+### Intégration des covariables dans ARIMA
+
+#### Préparation des covariables
+
+Pour capturer pleinement l'influence de la température sur la consommation d'énergie, j’ai ajouté la température extérieure et son carré (Température²) en tant que covariables. Ce choix permet de représenter à la fois les relations linéaires et non linéaires, offrant ainsi une meilleure modélisation des effets complexes de la température sur la consommation.
+
+```{r}
+# Ajouter le terme quadratique aux séries temporelles
+train_temperature2_ts <- train_temperature_ts^2
+test_temperature2_ts <- test_temperature_ts^2
+forecast_temperature2_ts <- predict_temperature^2
+```
+
+#### Ajustement du modèle ARIMA avec covariables (température et température²)
+
+```{r}
+# Ajuster le modèle ARIMA avec covariables
+fit_arima <- auto.arima(
+  train_consumption_electricity,
+  xreg = cbind(train_temperature_ts, train_temperature2_ts)
+)
+
+summary(fit_arima)
+```
+
+#### Prévisions et évaluation
+
+```{r}
+# Créer les matrices de covariables pour test et prévision
+test_xreg <- cbind(test_temperature_ts, test_temperature2_ts)
+forecast_xreg <- cbind(predict_temperature, forecast_temperature2_ts)
+
+# Prévisions pour l'ensemble de test
+forecast_test <- forecast(
+  fit_arima,
+  xreg = test_xreg
+)
+```
+
+```{r}
+# Calcul du RMSE
+actual_test <- test_consumption_electricity
+predicted_test <- forecast_test$mean
+rmse_arima_covar_auto <- sqrt(mean((actual_test - predicted_test)^2))
+cat("RMSE pour l'ensemble de test (ARIMA auto avec covariables) :", rmse_arima_covar_auto, "\n")
+```
+
+## Ajustement du modèle TSLM avec covariables (température et température²)
+
+Comme enseigné en cours, la première étape consiste à ajuster une régression linéaire (TSLM) avec les covariables pour capturer les tendances et les effets saisonniers. Ce modèle servira de base pour affiner et construire un meilleur modèle ARIMA avec covariables.
+
+```{r}
+# Ajuster le modèle tslm avec covariable
+tslm_model <- tslm(
+  train_consumption_electricity ~ train_temperature2_ts+ train_temperature_ts + trend + season 
+)
+
+# Résumé du modèle
+summary(tslm_model)
+```
+
+
+```{r}
+tsdisplay(tslm_model$residuals)
+```
+
+```{r}
+# Modèle SARIMA basé sur les résidus du modèle TSLM
+sarima_model <- Arima(
+  train_consumption_electricity, 
+  order = c(1, 0, 4),
+  seasonal = list(order = c(1, 1, 1), period = 96),
+  xreg = cbind(train_temperature_ts, train_temperature2_ts)  # Covariables
+)
+
+# Résumé du modèle SARIMA
+summary(sarima_model)
+```
+
+```{r}
+# Diagnostic des résidus
+checkresiduals(sarima_model)
+```
+
+```{r}
+# Prévisions pour les données de test
+sarima_forecast <- forecast(
+  sarima_model, 
+  h = length(test_consumption_electricity),
+  xreg = cbind(test_temperature_ts, test_temperature2_ts)  # Covariables pour les données de test
+)
+```
+
+
+```{r}
+# Calcul du RMSE pour le modèle SARIMA avec covariables
+sarima_with_covariate_rmse_man <- sqrt(mean((test_consumption_electricity - sarima_forecast$mean)^2))
+cat("RMSE pour SARIMA manuel avec covariables :", sarima_with_covariate_rmse_man, "\n")
+```
+
+## Prévision RNN avec Réseau de Neurones et Covariables (température et température²)
+
+
+```{r}
+# Préparer les covariables pour l'entraînement
+xreg_train <- cbind(
+  Temperature = as.numeric(train_temperature_ts),
+  Temperature2 = as.numeric(train_temperature_ts^2)
+)
+```
+
+```{r}
+fitt=nnetar(train_consumption_electricity,xreg=xreg_train) 
+print(fitt)
+```
+
+```{r}
+xreg_test <- cbind(
+  Temperature = as.numeric(test_temperature_ts),
+  Temperature2 = as.numeric(test_temperature_ts^2)
+)
+```
+
+```{r}
+prevNNcovar=forecast(fitt,xreg = xreg_test, h=96)
+```
+
+
+```{r}
+RNN_covar = sqrt(mean((prevNNcovar$mean-test_consumption_electricity)^2))
+
+cat("RMSE pour RNN avec covariables :", RNN_covar, "\n")
+
+```
+## XGBoost avec covariable (température)
+
+```{r}
+# Fonction pour créer les lags avec covariables
+create_lagged_data_with_covariate <- function(series, covariate, max_lag) {
+  data <- data.frame(Target = series)
+  for (lag in 1:max_lag) {
+    data[[paste0("Lag", lag)]] <- lag(series, n = lag)
+  }
+  covariate_lagged <- covariate[(max_lag + 1):length(covariate)]
+  data <- data[(max_lag + 1):nrow(data), ]
+  data$Temperature <- covariate_lagged
+  return(na.omit(data))
+}
+
+# Série complète avec température
+full_series_covar <- c(train_consumption_electricity, test_consumption_electricity)
+full_temperature_covar <- c(train_temperature_ts, test_temperature_ts)
+
+# Création des lags avec covariables
+lagged_data_covar <- create_lagged_data_with_covariate(as.numeric(full_series_covar), as.numeric(full_temperature_covar), max_lag)
+
+# Division en ensembles d'entraînement et de test
+train_data_covar <- lagged_data_covar[1:(length(train_consumption_electricity) - max_lag), ]
+test_data_covar <- lagged_data_covar[(length(train_consumption_electricity) - max_lag + 1):nrow(lagged_data_covar), ]
+
+# Préparer les matrices pour XGBoost
+train_matrix_covar <- as.matrix(train_data_covar[, -1])
+test_matrix_covar <- as.matrix(test_data_covar[, -1])
+train_target_covar <- train_data_covar$Target
+test_target_covar <- test_data_covar$Target
+
+```
+
+```{r}
+set.seed(42)
+start_time <- Sys.time()
+# Création des DMatrix
+dtrain_covar <- xgb.DMatrix(data = train_matrix_covar, label = train_target_covar)
+dtest_covar <- xgb.DMatrix(data = test_matrix_covar, label = test_target_covar)
+
+# Entraînement
+xgb_model_covar <- xgb.train(
+  params = list(
+    objective = "reg:squarederror",
+    eta = 0.1,
+    max_depth = 6,
+    subsample = 0.8,
+    colsample_bytree = 0.8
+  ),
+  data = dtrain_covar,
+  nrounds = 100,
+  watchlist = list(train = dtrain_covar, test = dtest_covar),
+  early_stopping_rounds = 10
+)
+
+# Prédictions
+xgb_predictions_covar <- predict(xgb_model_covar, newdata = dtest_covar)
+
+# Calcul du RMSE
+rmse_covar <- sqrt(mean((test_target_covar - xgb_predictions_covar)^2))
+cat("RMSE pour XGBoost avec covariables :", rmse_covar, "\n")
+end_time <- Sys.time()
+temps_total <- end_time - start_time
+cat(sprintf("Temps total d'exécution : %.2f secondes\n", as.numeric(temps_total, units = "secs")))
+
+```
+
+
+# Résumé des Performances
+
+```{r performance-summary}
+# Tableau des RMSE
+model_names <- c(
+  "Régression Linéaire",
+  "SES",
+  "Holt",
+  "Holt-Winters Additif",
+  "Holt-Winters Multiplicatif",
+  "ARIMA Auto Sans Covariables",
+  "ARIMA Manuel Sans Covariables",
+  "ARIMA Raffiné Sans Covariables",
+  "RNN Sans Covariables",
+  "XGBoost Sans Covariables",
+  "ARIMA Auto avec Covariables",
+  "ARIMA avec Covariables (Manuel)",
+  "RNN avec Covariables",
+  "XGBoost avec Covariables"
+)
+
+rmse_values <- c(
+  rmse_linear, 
+  rmse_ses, 
+  rmse_holt, 
+  rmse_hw_add, 
+  rmse_hw_mult,
+  rmse_arima,
+  rmse_sarima,
+  rmse_sarima_man,
+  rnn_rmse,
+  rmse_no_covar,
+  rmse_arima_covar_auto,
+  sarima_with_covariate_rmse_man,
+  RNN_covar,
+  rmse_covar
+)
+
+results <- data.frame(
+  Modèle = model_names,
+  RMSE = rmse_values
+)
+
+# Affichage du tableau
+print(results)
+```
+
+En se basant sur les résultats, le modèle XGBoost s'avère être le meilleur, que ce soit avec ou sans covariables, en termes de RMSE. Il obtient un RMSE de 12,25 sans covariable et de 12,13 avec covariable.
+
+# affichage des courbes des prévisions des meilleurs modèles obtenus
+
+```{r}
+# Fusionner les données d'entraînement, de test et les prédictions futures
+full_series_no_covar <- c(train_target_no_covar, test_target_no_covar, xgb_predictions_no_covar)
+
+# Création des phases pour le graphique
+phases_no_covar <- c(
+  rep("Entraînement", length(train_target_no_covar)),
+  rep("Test", length(test_target_no_covar)),
+  rep("Prédictions Futures", length(xgb_predictions_no_covar))
+)
+
+# Afficher le graphique
+plot(full_series_no_covar, type = "l", col = "black", xlab = "Temps", ylab = "Consommation",
+     main = "Prédictions XGBoost Sans Covariable : Entraînement, Test et Prévisions Futures")
+
+# Ajouter les phases avec des couleurs différentes
+lines(1:length(train_target_no_covar), train_target_no_covar, col = "blue")
+lines((length(train_target_no_covar) + 1):(length(train_target_no_covar) + length(test_target_no_covar)), 
+      test_target_no_covar, col = "green")
+lines((length(train_target_no_covar) + length(test_target_no_covar) + 1):length(full_series_no_covar), 
+      xgb_predictions_no_covar, col = "red")
+
+# Ajouter une légende
+legend("topleft", legend = c("Entraînement", "Test", "Prédictions Futures"),
+       col = c("blue", "green", "red"), lty = 1)
+
+```
+
+```{r}
+# Fusionner les données d'entraînement, de test et les prédictions futures
+full_series_covar <- c(train_target_covar, test_target_covar, xgb_predictions_covar)
+
+# Création des phases pour le graphique
+phases_covar <- c(
+  rep("Entraînement", length(train_target_covar)),
+  rep("Test", length(test_target_covar)),
+  rep("Prédictions Futures", length(xgb_predictions_covar))
+)
+
+# Afficher le graphique
+plot(full_series_covar, type = "l", col = "black", xlab = "Temps", ylab = "Consommation",
+     main = "Prédictions XGBoost Avec Covariable : Entraînement, Test et Prévisions Futures")
+
+# Ajouter les phases avec des couleurs différentes
+lines(1:length(train_target_covar), train_target_covar, col = "blue")
+lines((length(train_target_covar) + 1):(length(train_target_covar) + length(test_target_covar)), 
+      test_target_covar, col = "green")
+lines((length(train_target_covar) + length(test_target_covar) + 1):length(full_series_covar), 
+      xgb_predictions_covar, col = "red")
+
+# Ajouter une légende
+legend("topleft", legend = c("Entraînement", "Test", "Prédictions Futures"),
+       col = c("blue", "green", "red"), lty = 1)
+
+```
+
+
+```{r}
+forecast_df <- data.frame(
+  xgb_predictions_no_covar,  
+  xgb_predictions_covar
+)
+```
+
+```{r}
+head(forecast_df)
+```
+
+```{r}
+library(writexl)
+
+# Sauvegarder dans un fichier Excel
+write_xlsx(forecast_df, path = "Jomaa1.xlsx", col_names = FALSE)
+cat("Les prévisions ont été sauvegardées dans 'Jomaa.xlsx'\n")
+```
+
