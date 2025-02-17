@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This project focuses on forecasting electricity consumption for a future period (February 17, 2010) using different time series models, both with and without external covariates such as outdoor temperature.
+This project focuses on forecasting electricity consumption for a future period using different time series models, both with and without external covariates such as outdoor temperature.
 
 ---
 
